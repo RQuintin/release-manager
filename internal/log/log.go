@@ -13,13 +13,13 @@ type Logger struct {
 }
 
 func Init() {
-	config := zap.NewProductionConfig()
-	config.EncoderConfig.TimeKey = "@timestamp"
+	config := zap.NewDevelopmentConfig()
+	config.EncoderConfig.TimeKey = ""
 	config.EncoderConfig.MessageKey = "message"
 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.EncoderConfig.LevelKey = "level"
-	config.EncoderConfig.CallerKey = "caller"
-	config.EncoderConfig.StacktraceKey = "stacktrace"
+	config.EncoderConfig.LevelKey = "l"
+	config.EncoderConfig.CallerKey = ""
+	config.EncoderConfig.StacktraceKey = ""
 	config.EncoderConfig.LineEnding = zapcore.DefaultLineEnding
 	config.EncoderConfig.EncodeLevel = zapcore.LowercaseLevelEncoder
 	config.EncoderConfig.EncodeDuration = zapcore.SecondsDurationEncoder

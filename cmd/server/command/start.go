@@ -9,6 +9,7 @@ import (
 	"github.com/lunarway/release-manager/internal/flow"
 	"github.com/lunarway/release-manager/internal/git"
 	"github.com/lunarway/release-manager/internal/grafana"
+	"github.com/lunarway/release-manager/internal/instrumentation"
 	"github.com/lunarway/release-manager/internal/log"
 	"github.com/lunarway/release-manager/internal/policy"
 	"github.com/lunarway/release-manager/internal/slack"
@@ -57,9 +58,14 @@ func NewStart(grafanaOpts *grafanaOptions, slackAuthToken *string, configRepoOpt
 					},
 				},
 			}
+			instrumentor, err := instrumentation.NewInstrumentor()
+			if err != nil {
+				return errors.WithMessage(err, "initializing instrumentor")
+			}
 			gitSvc := git.Service{
 				SSHPrivateKeyPath: configRepoOpts.SSHPrivateKeyPath,
 				ConfigRepoURL:     configRepoOpts.ConfigRepo,
+				Instrumentor:      instrumentor,
 			}
 			flowSvc := flow.Service{
 				ArtifactFileName: configRepoOpts.ArtifactFileName,
@@ -72,7 +78,7 @@ func NewStart(grafanaOpts *grafanaOptions, slackAuthToken *string, configRepoOpt
 				Git: &gitSvc,
 			}
 			go func() {
-				err := http.NewServer(httpOpts, slackClient, &flowSvc, &policySvc)
+				err := http.NewServer(httpOpts, slackClient, &flowSvc, &policySvc, instrumentor)
 				if err != nil {
 					done <- errors.WithMessage(err, "new http server")
 					return

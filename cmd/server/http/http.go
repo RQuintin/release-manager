@@ -13,6 +13,7 @@ import (
 	"github.com/lunarway/release-manager/internal/flow"
 	"github.com/lunarway/release-manager/internal/git"
 	httpinternal "github.com/lunarway/release-manager/internal/http"
+	"github.com/lunarway/release-manager/internal/instrumentation"
 	"github.com/lunarway/release-manager/internal/log"
 	policyinternal "github.com/lunarway/release-manager/internal/policy"
 	"github.com/lunarway/release-manager/internal/slack"
@@ -29,7 +30,7 @@ type Options struct {
 	DaemonAuthToken     string
 }
 
-func NewServer(opts *Options, slackClient *slack.Client, flowSvc *flow.Service, policySvc *policyinternal.Service) error {
+func NewServer(opts *Options, slackClient *slack.Client, flowSvc *flow.Service, policySvc *policyinternal.Service, intrumentor *instrumentation.Instrumentor) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", ping)
 	mux.HandleFunc("/promote", authenticate(opts.HamCtlAuthToken, promote(flowSvc)))
@@ -39,6 +40,7 @@ func NewServer(opts *Options, slackClient *slack.Client, flowSvc *flow.Service, 
 	mux.HandleFunc("/policies", authenticate(opts.HamCtlAuthToken, policy(policySvc)))
 	mux.HandleFunc("/webhook/github", githubWebhook(flowSvc, policySvc, slackClient, opts.GithubWebhookSecret))
 	mux.HandleFunc("/webhook/daemon", authenticate(opts.DaemonAuthToken, daemonWebhook(flowSvc)))
+	mux.Handle("/metrics", intrumentor.HTTPHandler())
 
 	s := http.Server{
 		Addr:              fmt.Sprintf(":%d", opts.Port),

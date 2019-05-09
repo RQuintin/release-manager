@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/lunarway/release-manager/internal/instrumentation"
 	"github.com/lunarway/release-manager/internal/log"
 	"github.com/pkg/errors"
 	git "gopkg.in/src-d/go-git.v4"
@@ -28,6 +29,7 @@ var (
 type Service struct {
 	SSHPrivateKeyPath string
 	ConfigRepoURL     string
+	Instrumentor      *instrumentation.Instrumentor
 }
 
 func (s *Service) CloneDepth(ctx context.Context, destination string, depth int) (*git.Repository, error) {
@@ -38,6 +40,7 @@ func (s *Service) Clone(ctx context.Context, destination string) (*git.Repositor
 }
 
 func (s *Service) clone(ctx context.Context, destination string, depth int) (*git.Repository, error) {
+	defer s.Instrumentor.ObserveGitClone(depth)()
 	authSSH, err := ssh.NewPublicKeysFromFile("git", s.SSHPrivateKeyPath, "")
 	if err != nil {
 		return nil, errors.WithMessage(err, "public keys from file")
