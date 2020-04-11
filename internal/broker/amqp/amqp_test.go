@@ -77,20 +77,20 @@ func TestWorker_PublishAndConsumer(t *testing.T) {
 	consumerWg.Add(1)
 	go func() {
 		defer consumerWg.Done()
-		err := worker.StartConsumer(map[string]func([]byte) error{
-			testEvent{}.Type(): func(d []byte) error {
+		err := worker.StartConsumer(broker.Handlers{
+			testEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 				newCount := atomic.AddInt32(&receivedCount, 1)
 				if int(newCount) == publishedMessages {
 					close(receivedAllEvents)
 				}
 				var msg testEvent
-				err := json.Unmarshal(d, &msg)
+				err := msg.Unmarshal(m.Body())
 				if err != nil {
 					return err
 				}
 				logger.Infof("Received %s", msg.Message)
 				return nil
-			},
+			}),
 		})
 		assert.EqualError(t, err, broker.ErrBrokerClosed.Error(), "unexpected consumer error")
 	}()
@@ -229,12 +229,12 @@ func TestWorker_reconnection(t *testing.T) {
 	// long as we are able to keep a connection open with retries. If we
 	// have no more retry attempts left the function will return with an
 	// error.
-	err = worker.StartConsumer(map[string]func([]byte) error{
-		testEvent{}.Type(): func(d []byte) error {
-			logger.Infof("Handled %s", d)
+	err = worker.StartConsumer(broker.Handlers{
+		testEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
+			logger.Infof("Handled %s", m)
 			atomic.AddInt32(&consumedCount, 1)
 			return nil
-		},
+		}),
 	})
 	logger.Infof("TEST: worker error: %v", err)
 	assert.EqualError(t, err, broker.ErrBrokerClosed.Error(), "consumer returned unexpected error")

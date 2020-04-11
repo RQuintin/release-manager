@@ -11,17 +11,34 @@ type Broker interface {
 	Publish(ctx context.Context, message Publishable) error
 	// StartConsumer consumes messages on a broker. This method is blocking and
 	// will always return with ErrBrokerClosed after calls to Close.
-	StartConsumer(handlers map[string]func([]byte) error) error
+	StartConsumer(handlers Handlers) error
 	// Close closes the broker.
 	Close() error
 }
 
-// Publishable represents an enty capable of being published and consumed by a
-// Broker.
+// Publishable represents an enty capable of being published by a Broker.
 type Publishable interface {
 	Type() string
 	Marshal() ([]byte, error)
-	Unmarshal([]byte) error
+}
+
+type Message interface {
+	Type() string
+	Body() []byte
+}
+
+type Handlers map[string]Handler
+
+type Handler interface {
+	Handle(context.Context, Message) error
+}
+
+type HandleFunc func(context.Context, Message) error
+
+var _ Handler = HandleFunc(nil)
+
+func (f HandleFunc) Handle(ctx context.Context, m Message) error {
+	return f(ctx, m)
 }
 
 // ErrBrokerClosed indicates that the broker was closed by a call to Close.

@@ -53,21 +53,21 @@ func TestBroker_PublishAndConsumer(t *testing.T) {
 	consumerWg.Add(1)
 	go func() {
 		defer consumerWg.Done()
-		err := memoryBroker.StartConsumer(map[string]func([]byte) error{
-			testEvent{}.Type(): func(d []byte) error {
+		err := memoryBroker.StartConsumer(broker.LoggingHandlers(logger, broker.Handlers{
+			testEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 				newCount := atomic.AddInt32(&receivedCount, 1)
 				if int(newCount) == publishedMessages {
 					close(receivedAllEvents)
 				}
 				var msg testEvent
-				err := json.Unmarshal(d, &msg)
+				err := json.Unmarshal(m.Body(), &msg)
 				if err != nil {
 					return err
 				}
 				logger.Infof("Received %s", msg.Message)
 				return nil
-			},
-		})
+			}),
+		}))
 		assert.EqualError(t, err, broker.ErrBrokerClosed.Error(), "unexpected consumer error")
 	}()
 

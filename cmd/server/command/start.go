@@ -226,40 +226,40 @@ func NewStart(grafanaOpts *grafanaOptions, slackAuthToken *string, githubAPIToke
 				},
 			}
 
-			eventHandlers := map[string]func([]byte) error{
-				flow.PromoteEvent{}.Type(): func(d []byte) error {
+			eventHandlers := broker.LoggingHandlers(log.With("system", "eventhandlers"), broker.Handlers{
+				flow.PromoteEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 					var event flow.PromoteEvent
-					err := event.Unmarshal(d)
+					err := event.Unmarshal(m.Body())
 					if err != nil {
 						return errors.WithMessage(err, "unmarshal event")
 					}
-					return flowSvc.ExecPromote(context.Background(), event)
-				},
-				flow.ReleaseArtifactIDEvent{}.Type(): func(d []byte) error {
+					return flowSvc.ExecPromote(ctx, event)
+				}),
+				flow.ReleaseArtifactIDEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 					var event flow.ReleaseArtifactIDEvent
-					err := event.Unmarshal(d)
+					err := event.Unmarshal(m.Body())
 					if err != nil {
 						return errors.WithMessage(err, "unmarshal event")
 					}
-					return flowSvc.ExecReleaseArtifactID(context.Background(), event)
-				},
-				flow.ReleaseBranchEvent{}.Type(): func(d []byte) error {
+					return flowSvc.ExecReleaseArtifactID(ctx, event)
+				}),
+				flow.ReleaseBranchEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 					var event flow.ReleaseBranchEvent
-					err := event.Unmarshal(d)
+					err := event.Unmarshal(m.Body())
 					if err != nil {
 						return errors.WithMessage(err, "unmarshal event")
 					}
-					return flowSvc.ExecReleaseBranch(context.Background(), event)
-				},
-				flow.RollbackEvent{}.Type(): func(d []byte) error {
+					return flowSvc.ExecReleaseBranch(ctx, event)
+				}),
+				flow.RollbackEvent{}.Type(): broker.HandleFunc(func(ctx context.Context, m broker.Message) error {
 					var event flow.RollbackEvent
-					err := event.Unmarshal(d)
+					err := event.Unmarshal(m.Body())
 					if err != nil {
 						return errors.WithMessage(err, "unmarshal event")
 					}
-					return flowSvc.ExecRollback(context.Background(), event)
-				},
-			}
+					return flowSvc.ExecRollback(ctx, event)
+				}),
+			})
 			brokerImpl, err := getBroker(brokerOptions)
 			if err != nil {
 				return errors.WithMessage(err, "setup broker")

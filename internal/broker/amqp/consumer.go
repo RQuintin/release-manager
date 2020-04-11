@@ -1,9 +1,11 @@
 package amqp
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	"github.com/lunarway/release-manager/internal/broker"
 	"github.com/lunarway/release-manager/internal/log"
 	"github.com/pkg/errors"
 	"github.com/streadway/amqp"
@@ -60,7 +62,7 @@ func (c *consumer) Close() error {
 	return nil
 }
 
-func (c *consumer) Start(logger *log.Logger, handlers map[string]func([]byte) error) error {
+func (c *consumer) Start(logger *log.Logger, handlers broker.Handlers) error {
 	msgs, err := c.channel.Consume(
 		c.queue.Name,      // queue
 		"release-manager", // consumer
@@ -97,7 +99,10 @@ func (c *consumer) Start(logger *log.Logger, handlers map[string]func([]byte) er
 			}
 			continue
 		}
-		err := handler(msg.Body)
+		ctx := context.Background()
+		err := handler.Handle(ctx, &message{
+			delivery: msg,
+		})
 		duration := time.Since(now).Milliseconds()
 		if err != nil {
 			logger.With("res", map[string]interface{}{
@@ -123,4 +128,18 @@ func (c *consumer) Start(logger *log.Logger, handlers map[string]func([]byte) er
 		}
 	}
 	return nil
+}
+
+type message struct {
+	delivery amqp.Delivery
+}
+
+var _ broker.Message = &message{}
+
+func (m *message) Type() string {
+	return m.delivery.Type
+}
+
+func (m *message) Body() []byte {
+	return m.delivery.Body
 }

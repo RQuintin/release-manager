@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/lunarway/release-manager/internal/broker"
@@ -41,40 +40,37 @@ func (b *Broker) Publish(ctx context.Context, event broker.Publishable) error {
 	return nil
 }
 
-func (b *Broker) StartConsumer(handlers map[string]func([]byte) error) error {
+func (b *Broker) StartConsumer(handlers broker.Handlers) error {
 	for msg := range b.queue {
-		logger := b.logger.With(
-			"eventType", msg.Type(),
-		)
-		logger.WithFields("message", msg).Infof("Received message type=%s", msg.Type())
 		handler, ok := handlers[msg.Type()]
 		if !ok {
-			logger.With("res", map[string]interface{}{
-				"status": "failed",
-				"error":  "unprocessable",
-			}).Errorf("[consumer] [UNPROCESSABLE] Failed to handle message: no handler registered for event type '%s': dropping it", msg.Type)
+			b.logger.With(
+				"eventType", msg.Type(),
+				"res", map[string]interface{}{
+					"status": "failed",
+					"error":  "unprocessable",
+				}).Errorf("mem [consumer] [UNPROCESSABLE] Failed to handle message: no handler registered for event type '%s': dropping it", msg.Type)
 			continue
 		}
-		body, err := msg.Marshal()
-		if err != nil {
-			logger.Errorf("[consumer] [UNPROCESSABLE] Could not get body of message: %v", err)
-			continue
-		}
-		now := time.Now()
-		err = handler(body)
-		duration := time.Since(now).Milliseconds()
-		if err != nil {
-			logger.With("res", map[string]interface{}{
-				"status":       "failed",
-				"responseTime": duration,
-				"error":        fmt.Sprintf("%+v", err),
-			}).Errorf("[consumer] [FAILED] Failed to handle message: nacking and requeing: %v", err)
-			continue
-		}
-		logger.With("res", map[string]interface{}{
-			"status":       "ok",
-			"responseTime": duration,
-		}).Info("[OK] Event handled successfully")
+		ctx := context.Background()
+		handler.Handle(ctx, &message{
+			p: msg,
+		})
 	}
 	return broker.ErrBrokerClosed
+}
+
+type message struct {
+	p broker.Publishable
+}
+
+var _ broker.Message = &message{}
+
+func (m *message) Type() string {
+	return m.p.Type()
+}
+
+func (m *message) Body() []byte {
+	b, _ := m.p.Marshal()
+	return b
 }

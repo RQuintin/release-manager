@@ -92,7 +92,7 @@ func (s *Worker) Close() error {
 
 // StartConsumer starts the consumer on the worker. The method is blocking and
 // will only return if the worker is stopped with Close.
-func (s *Worker) StartConsumer(handlers map[string]func([]byte) error) error {
+func (s *Worker) StartConsumer(handlers broker.Handlers) error {
 	for {
 		select {
 		// worker is instructed to shutdown from a Close call
