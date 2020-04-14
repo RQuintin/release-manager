@@ -1,8 +1,7 @@
-package amqp
+package secureamqp_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lunarway/release-manager/internal/broker"
+	"github.com/lunarway/release-manager/internal/broker/secureamqp"
 	"github.com/lunarway/release-manager/internal/log"
 	"github.com/lunarway/release-manager/internal/test"
 	"github.com/streadway/amqp"
@@ -18,24 +18,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-var _ broker.Broker = &Worker{}
-var _ broker.Publishable = &testEvent{}
-
-type testEvent struct {
-	Message string `json:"message"`
-}
-
-func (testEvent) Type() string {
-	return "test-event"
-}
-
-func (t testEvent) Marshal() ([]byte, error) {
-	return json.Marshal(t)
-}
-
-func (t *testEvent) Unmarshal(d []byte) error {
-	return json.Unmarshal(d, t)
-}
+var _ broker.Broker = &secureamqp.Session{}
 
 // TestWorker_reconnection tests the reconnection mechanism of the worker
 // ensuring that network failures and alike are mitigated by reconnecting.
@@ -73,9 +56,8 @@ func TestWorker_reconnection(t *testing.T) {
 
 	epoch := time.Now().UnixNano()
 	var consumedCount int32
-	worker, err := NewWorker(Config{
-		Connection: ConnectionConfig{
-
+	amqpBroker := secureamqp.New(secureamqp.Config{
+		Connection: secureamqp.ConnectionConfig{
 			Host:        rabbitHost,
 			User:        "lunar",
 			Password:    "lunar",
@@ -92,9 +74,6 @@ func TestWorker_reconnection(t *testing.T) {
 		},
 		Logger: logger,
 	})
-	if !assert.NoError(t, err, "unexpected init error") {
-		return
-	}
 
 	// setup a go routine that will publish a message, kill the connection and
 	// publish a new message
@@ -106,7 +85,7 @@ func TestWorker_reconnection(t *testing.T) {
 		// called outside to Go routine
 		time.Sleep(10 * time.Millisecond)
 
-		err := worker.Publish(context.Background(), &testEvent{
+		err := amqpBroker.Publish(context.Background(), &test.Event{
 			Message: "message 1",
 		})
 		if err != nil {
@@ -120,9 +99,9 @@ func TestWorker_reconnection(t *testing.T) {
 		}
 
 		// wait some seconds before publishing again for retries to take place
-		// time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 
-		err = worker.Publish(context.Background(), &testEvent{
+		err = amqpBroker.Publish(context.Background(), &test.Event{
 			Message: "message 2",
 		})
 		if err != nil {
@@ -132,7 +111,7 @@ func TestWorker_reconnection(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		logger.Infof("TEST: Shutting down worker...")
 		// shutdown rabbit connection
-		err = worker.Close()
+		err = amqpBroker.Close()
 		assert.NoError(t, err, "unexpected close error")
 	}()
 
@@ -140,8 +119,8 @@ func TestWorker_reconnection(t *testing.T) {
 	// long as we are able to keep a connection open with retries. If we
 	// have no more retry attempts left the function will return with an
 	// error.
-	err = worker.StartConsumer(map[string]func([]byte) error{
-		testEvent{}.Type(): func(d []byte) error {
+	err := amqpBroker.StartConsumer(map[string]func([]byte) error{
+		test.Event{}.Type(): func(d []byte) error {
 			logger.Infof("Handled %s", d)
 			atomic.AddInt32(&consumedCount, 1)
 			return nil

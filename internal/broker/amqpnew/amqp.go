@@ -1,4 +1,4 @@
-package amqp
+package amqpnew
 
 import (
 	"context"
@@ -23,6 +23,12 @@ import (
 type Worker struct {
 	config Config
 
+	connection *amqp.Connection
+	// connectionClosed is used to signal that a connection was lost and that the
+	// reconnector should attempt to reestablish it.
+	connectionClosed chan *amqp.Error
+	done             chan struct{}
+
 	// currentConsumer provides an active connection to consume from.
 	currentConsumer chan *consumer
 	// currentConsumer provides an active connection to publish on.
@@ -30,9 +36,6 @@ type Worker struct {
 	// shutdown is used to terminate the different Go routines in the worker. It
 	// will be closed as a signal to stop.
 	shutdown chan struct{}
-	// connectionClosed is used to signal that a connection was lost and that the
-	// reconnector should attempt to reestablish it.
-	connectionClosed chan *amqp.Error
 }
 
 type publisher interface {
@@ -76,18 +79,187 @@ func NewWorker(c Config) (*Worker, error) {
 		connectionClosed: make(chan *amqp.Error),
 		config:           c,
 	}
-
-	err := worker.connect()
-	if err != nil {
-		return nil, err
-	}
-	go worker.reconnector()
+	go worker.handleReconnection()
 	return &worker, nil
+}
+
+func (s *Worker) handleReconnection() {
+	s.config.Logger.Info("Reconnector started")
+	defer s.config.Logger.Info("Reconnector stopped")
+	for {
+		s.config.Logger.Info("Attempting to connect")
+
+		err := s.connect()
+		if err != nil {
+			s.config.Logger.Infof("Failed to connect. Retrying: %v", err)
+			select {
+			case <-s.done:
+				return
+			case <-time.After(s.config.ReconnectionTimeout):
+				continue
+			}
+		}
+
+		done := s.handleReInit()
+		if done {
+			return
+		}
+	}
+}
+
+func (s *Worker) handleReInit() bool {
+	for {
+		err := s.init()
+		if err != nil {
+			s.config.Logger.Infof("Failed to initialize channel. Retrying: %v", err)
+			select {
+			case <-s.done:
+				return true
+			case amqpErr := <-s.connectionClosed:
+				s.config.Logger.Infof("Connection closed: %v", amqpErr)
+				return false
+			}
+		}
+	}
+}
+
+func (s *Worker) connect() error {
+	c := s.config
+	logger := c.Logger.WithFields("host", c.Connection.Host, "user", c.Connection.User, "port", c.Connection.Port, "virtualHost", c.Connection.VirtualHost, "exchange", c.Exchange, "queue", c.Queue, "prefetch", c.Prefetch, "reconnectionTimeout", c.ReconnectionTimeout, "amqpConfig", fmt.Sprintf("%#v", c.AMQPConfig))
+	logger.Infof("Connecting to: %s", c.Connection.String())
+
+	if c.AMQPConfig != nil && c.Connection.VirtualHost != c.AMQPConfig.Vhost {
+		logger.Infof("AMQP config overwrites provided virtual host")
+	}
+	if c.AMQPConfig == nil {
+		c.AMQPConfig = &amqp.Config{
+			Heartbeat: 60 * time.Second,
+			Vhost:     c.Connection.VirtualHost,
+		}
+	}
+	amqpConnection, err := amqp.DialConfig(c.Connection.Raw(), *c.AMQPConfig)
+	if err != nil {
+		return errors.WithMessage(err, "connect to amqp")
+	}
+	s.changeConnection(amqpConnection)
+	logger.Infof("Connected to: %s", c.Connection.String())
+	return nil
+}
+
+func (s *Worker) changeConnection(connection *amqp.Connection) {
+	s.connection = connection
+	s.connectionClosed = make(chan *amqp.Error)
+	s.connection.NotifyClose(s.connectionClosed)
+}
+
+func (s *Worker) init() error {
+	s.config.Logger.Info("Initializing consumer and publisher")
+	c := s.config
+
+	err := s.declareExchange()
+	if err != nil {
+		return errors.WithMessage(err, "declare exchange")
+	}
+
+	// TODO: this could be instantiated from a list of exchange and queue pairs to
+	// setup more than one consumer
+	consumer, err := newConsumer(s.connection, c.Exchange, c.Queue, c.RoutingKey, c.Prefetch)
+	if err != nil {
+		return errors.WithMessage(err, "create consumer")
+	}
+
+	rawPublisher, err := newPublisher(s.connection, c.Exchange, func(ctx context.Context, reason error) {
+		c.Logger.Infof("Publish retrying: %v", reason)
+	})
+	if err != nil {
+		return errors.WithMessage(err, "create publisher")
+	}
+	s.currentPublisher = &loggingPublisher{
+		publisher: rawPublisher,
+		logger:    c.Logger,
+	}
+
+	// listen for connection failures on the specific connection along with
+	// closing the connection if general shutdown is signalled
+	go func() {
+		c.Logger.Info("Connection close listener started")
+		defer c.Logger.Info("Connection close listener stopped")
+		select {
+		case <-s.shutdown:
+			if s.connection.IsClosed() {
+				return
+			}
+			err := consumer.Close()
+			if err != nil {
+				c.Logger.Errorf("Failed to close consumer: %v", err)
+			}
+			err = s.currentPublisher.Close()
+			if err != nil {
+				c.Logger.Errorf("Failed to close publisher: %v", err)
+			}
+			err = s.connection.Close()
+			if err != nil {
+				c.Logger.Errorf("Failed to close amqp connection: %v", err)
+			}
+		case err, abnormalShutdown := <-s.connectionClosed:
+			if !abnormalShutdown {
+				c.Logger.Info("Connection closed due to normal shutdown")
+				return
+			}
+			c.Logger.Info("Connection closed due to abnormal shutdown")
+			// signal the worker that the connection was lost
+			s.connectionClosed <- err
+		}
+	}()
+	go func() {
+		select {
+		case <-s.shutdown:
+		case s.currentConsumer <- consumer:
+		}
+	}()
+	s.config.Logger.Info("Connected to AMQP successfully")
+	return nil
+}
+
+func (s *Worker) declareExchange() error {
+	exchangeChannel, err := s.connection.Channel()
+	if err != nil {
+		return errors.WithMessage(err, "open channel for exchange declaration")
+	}
+	err = exchangeChannel.ExchangeDeclare(
+		s.config.Exchange,
+		"topic", // kind
+		true,    // durable
+		false,   // autoDelete
+		false,   // internal
+		false,   // noWait
+		nil,     // args
+	)
+	if err != nil {
+		return errors.WithMessage(err, "declare exchange")
+	}
+	return nil
 }
 
 func (s *Worker) Close() error {
 	close(s.shutdown)
 	return nil
+}
+
+// reconnect attempts to reconnect to AMQP with the configured reconnection
+// timeout between attempts.
+func (s *Worker) reconnect() {
+	for reconnectCount := 1; ; reconnectCount++ {
+		s.config.Logger.Infof("Reconnecting to AMQP after connection closed: attempt %d", reconnectCount)
+		err := s.connect()
+		if err != nil {
+			s.config.Logger.Infof("Failed to reconnect to AMQP: %v", err)
+			time.Sleep(s.config.ReconnectionTimeout)
+			continue
+		}
+		s.config.Logger.Info("Successfully reconnected to AMQP")
+		return
+	}
 }
 
 // StartConsumer starts the consumer on the worker. The method is blocking and
@@ -125,147 +297,4 @@ func (s *Worker) Publish(ctx context.Context, event broker.Publishable) error {
 		return err
 	}
 	return nil
-}
-
-func (s *Worker) connect() error {
-	c := s.config
-	logger := c.Logger.WithFields(
-		"host", c.Connection.Host,
-		"user", c.Connection.User,
-		"port", c.Connection.Port,
-		"virtualHost", c.Connection.VirtualHost,
-		"exchange", c.Exchange,
-		"queue", c.Queue,
-		"prefetch", c.Prefetch,
-		"reconnectionTimeout", c.ReconnectionTimeout,
-		"amqpConfig", fmt.Sprintf("%#v", c.AMQPConfig),
-	)
-	logger.Infof("Connecting to: %s", c.Connection.String())
-
-	if c.AMQPConfig != nil && c.Connection.VirtualHost != c.AMQPConfig.Vhost {
-		logger.Infof("AMQP config overwrites provided virtual host")
-	}
-	if c.AMQPConfig == nil {
-		c.AMQPConfig = &amqp.Config{
-			Heartbeat: 60 * time.Second,
-			Vhost:     c.Connection.VirtualHost,
-		}
-	}
-	amqpConn, err := amqp.DialConfig(c.Connection.Raw(), *c.AMQPConfig)
-	if err != nil {
-		return errors.WithMessage(err, "connect to amqp")
-	}
-	connectionClosedListener := make(chan *amqp.Error)
-	amqpConn.NotifyClose(connectionClosedListener)
-
-	exchangeChannel, err := amqpConn.Channel()
-	if err != nil {
-		return errors.WithMessage(err, "open channel for exchange declaration")
-	}
-	err = exchangeChannel.ExchangeDeclare(
-		c.Exchange,
-		"topic", // kind
-		true,    // durable
-		false,   // autoDelete
-		false,   // internal
-		false,   // noWait
-		nil,     // args
-	)
-	if err != nil {
-		return errors.WithMessage(err, "declare exchange")
-	}
-
-	// TODO: this could be instantiated from a list of exchange and queue pairs to
-	// setup more than one consumer
-	consumer, err := newConsumer(amqpConn, c.Exchange, c.Queue, c.RoutingKey, c.Prefetch)
-	if err != nil {
-		return errors.WithMessage(err, "create consumer")
-	}
-
-	rawPublisher, err := newPublisher(amqpConn, c.Exchange, func(ctx context.Context, reason error) {
-		c.Logger.Infof("Publish retrying: %v", reason)
-	})
-	if err != nil {
-		return errors.WithMessage(err, "create publisher")
-	}
-	s.currentPublisher = &loggingPublisher{
-		publisher: rawPublisher,
-		logger:    c.Logger,
-	}
-
-	// listen for connection failures on the specific connection along with
-	// closing the connection if general shutdown is signalled
-	go func() {
-		c.Logger.Info("Connection close listener started")
-		defer c.Logger.Info("Connection close listener stopped")
-		select {
-		case <-s.shutdown:
-			if amqpConn.IsClosed() {
-				return
-			}
-			err := consumer.Close()
-			if err != nil {
-				c.Logger.Errorf("Failed to close consumer: %v", err)
-			}
-			err = s.currentPublisher.Close()
-			if err != nil {
-				c.Logger.Errorf("Failed to close publisher: %v", err)
-			}
-			err = amqpConn.Close()
-			if err != nil {
-				c.Logger.Errorf("Failed to close amqp connection: %v", err)
-			}
-		case err, abnormalShutdown := <-connectionClosedListener:
-			if !abnormalShutdown {
-				c.Logger.Info("Connection closed due to normal shutdown")
-				return
-			}
-			c.Logger.Info("Connection closed due to abnormal shutdown")
-			// signal the worker that the connection was lost
-			s.connectionClosed <- err
-		}
-	}()
-	go func() {
-		select {
-		case <-s.shutdown:
-		case s.currentConsumer <- consumer:
-		}
-	}()
-	logger.Info("Connected to AMQP successfully")
-	return nil
-}
-
-func (s *Worker) reconnector() {
-	s.config.Logger.Info("Reconnector started")
-	defer s.config.Logger.Info("Reconnector stopped")
-	for {
-		select {
-		case <-s.shutdown:
-			s.config.Logger.Info("Reconnector received shutdown signal")
-			return
-		case reason := <-s.connectionClosed:
-			s.config.Logger.Infof("Reconnector received connection closed signal: %v", reason)
-			err := s.currentPublisher.Close()
-			if err != nil {
-				s.config.Logger.Infof("Failed to close current publisher: %v", err)
-			}
-			s.reconnect()
-		}
-	}
-}
-
-// reconnect attempts to reconnect to AMQP with the configured reconnection
-// timeout between attempts.
-func (s *Worker) reconnect() {
-	for reconnectCount := 1; ; reconnectCount++ {
-		s.config.Logger.Infof("Reconnecting to AMQP after connection closed: attempt %d", reconnectCount)
-		err := s.connect()
-		if err != nil {
-			s.config.Logger.Infof("Failed to reconnect to AMQP: %v", err)
-			time.Sleep(s.config.ReconnectionTimeout)
-			continue
-		}
-		s.config.Logger.Info("Successfully reconnected to AMQP")
-		return
-	}
 }
