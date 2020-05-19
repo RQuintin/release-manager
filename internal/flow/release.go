@@ -70,6 +70,10 @@ func (s *Service) ReleaseBranch(ctx context.Context, actor Actor, environment, s
 		return "", ErrNothingToRelease
 	}
 
+	// check that there is a configuration for the target environment. This covers
+	// two cases. Some services are not releaseable to certain environments and if
+	// the environment is not a valid destination.
+
 	err = s.PublishReleaseBranch(ctx, ReleaseBranchEvent{
 		Branch:      branch,
 		Actor:       actor,
